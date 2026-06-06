@@ -94,7 +94,12 @@ async def open_pool() -> None:
         return
     p: Optional[AsyncConnectionPool] = None
     try:
-        p = AsyncConnectionPool(url, min_size=1, max_size=15, open=False, kwargs={"autocommit": True})
+        # prepare_threshold=None disables auto-prepared-statements so EITHER a
+        # Neon pooled (PgBouncer transaction-mode) OR direct connection string works.
+        p = AsyncConnectionPool(
+            url, min_size=1, max_size=15, open=False,
+            kwargs={"autocommit": True, "prepare_threshold": None},
+        )
         await p.open(wait=True, timeout=10)
         async with p.connection() as conn:
             async with conn.transaction():
