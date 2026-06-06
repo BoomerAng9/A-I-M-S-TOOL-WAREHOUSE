@@ -32,6 +32,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from . import advisor
 from .integrations.catalog import category_rollup, query_tools, select_certified
 from .integrations.registry import IntegrationRegistry
 from .picker_ang.tool_warehouse import ToolWarehouse
@@ -189,6 +190,21 @@ async def integrations_health(caller: Caller = Depends(_CATALOG_READ)) -> dict[s
         "summary": {h.name: h.status for h in results},
         "integrations": [h.to_dict() for h in results],
     }
+
+
+# --------------------------- advisor (goal-mode tool recommendations) ---------------------------
+class RecommendRequest(BaseModel):
+    goal: str = Field(min_length=1, max_length=2000)
+    limit: int = Field(default=8, ge=1, le=20)
+
+
+@app.post("/recommend")
+async def recommend_tools(body: RecommendRequest, caller: Caller = Depends(_CATALOG_READ)) -> dict[str, Any]:
+    """AIMS Advisor — goal mode: which certified tools to integrate, where, and why."""
+    await _record(caller, "/recommend")
+    if _warehouse is None:
+        return {"goal": body.goal, "advisor": "none", "considered": 0, "recommendations": [], "message": "catalog not loaded"}
+    return await advisor.recommend(_warehouse, body.goal, limit=body.limit)
 
 
 # --------------------------- admin: status + tenants + keys (operator only) ---------------------------
