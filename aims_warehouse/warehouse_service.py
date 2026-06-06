@@ -1,41 +1,47 @@
-"""Tool Warehouse — standalone, independently-deployable service.
+"""Tool Warehouse — standalone, independently-deployable PRODUCT service.
 
-A self-contained ASGI app exposing the INTERNAL fast-retrieval tool catalog (the
-Picker_Ang inventory) plus live integration health. It runs the SAME logic
-Charlotte's `/api/warehouse/*` handlers run — both call the shared functions in
-`charlotte.integrations.catalog`, so the two surfaces can never drift — but as
-its OWN thing: its own container, its own port, its own minimal env (no Neon
-DSN, no signing key — least privilege), reading the SAME physical inventory file
-Charlotte reads (one source of truth, bind-mounted read-only into both). It is
-NOT wired into Charlotte's build path; it never imports the build engine, Neon,
-or `api.routes` — only the warehouse model, the integration registry, and the
-shared catalog logic.
+The EXTERNAL multi-tenant product on warehouse.aimanagedsolutions.cloud. It runs
+the SAME catalog logic Charlotte's ``/api/warehouse/*`` handlers run (the shared
+functions in ``.integrations.catalog``) but as its OWN thing — own image, own
+port, own (isolated) database — and Charlotte is just one consumer/tenant.
 
-Run: `uvicorn charlotte.warehouse_service:app --host 0.0.0.0 --port 8090`
+Auth (two callers):
+  - OPERATOR: the static ``X-Service-Token`` (env ``TOOL_WAREHOUSE_TOKEN``).
+    Superuser; gates /admin and may read the catalog.
+  - TENANT: a per-tenant API key (``Authorization: Bearer aimswh_...`` or
+    ``X-API-Key``), scoped/revocable/expirable — how a company's own agent reaches
+    the catalog. Catalog routes require the ``catalog:read`` scope.
+  ``/health`` is unauthenticated liveness only (no posture disclosure); the full
+  tenancy/readiness posture is operator-gated at ``/admin/status``.
 
-Auth: a single shared service token in the `X-Service-Token` header (env
-`TOOL_WAREHOUSE_TOKEN`). When that env is unset the protected routes are OPEN —
-acceptable only when the service is bound to loopback; set the token to gate it
-on a shared network. `/health` is always unauthenticated (liveness only, no
-catalog rows, no integration topology).
+Tenancy degrades safely: with no ``WAREHOUSE_DATABASE_URL`` the catalog is gated
+by the operator token alone (P1 behaviour), so shipping this code never breaks the
+live service before the DB is wired. Interactive docs are disabled in this build.
+
+Run: ``uvicorn aims_warehouse.warehouse_service:app --host 0.0.0.0 --port 8090``
 """
 from __future__ import annotations
 
+import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from .integrations.catalog import category_rollup, query_tools, select_certified
 from .integrations.registry import IntegrationRegistry
 from .picker_ang.tool_warehouse import ToolWarehouse
+from .tenancy import db as tdb
+from .tenancy import store as tstore
+from .tenancy.auth import Caller, require_admin, resolve_caller
+
+_log = logging.getLogger("aims_warehouse.service")
 
 _DEFAULT_DATA = (
-    Path(__file__).resolve().parent
-    / "picker_ang"
-    / "data"
-    / "foai-tool-inventory-log.jsonl"
+    Path(__file__).resolve().parent / "picker_ang" / "data" / "foai-tool-inventory-log.jsonl"
 )
 
 
@@ -44,9 +50,8 @@ def _data_path() -> Path:
     return Path(override) if override else _DEFAULT_DATA
 
 
-# Loaded once at import — the inventory is a static, read-only bind-mount. Both
-# loads degrade to None on any error so the service stays up and reports it via
-# /health (never crashes on a missing/garbled file).
+# Catalog loaded once at import — static, read-only. Degrades to None on any
+# error so the service stays up and reports it via /health.
 _registry = IntegrationRegistry()
 try:
     _warehouse: ToolWarehouse | None = ToolWarehouse.from_jsonl(_data_path())
@@ -54,78 +59,181 @@ except Exception:
     _warehouse = None
 
 
-app = FastAPI(title="FOAI Tool Warehouse", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    await tdb.open_pool()  # opens iff WAREHOUSE_DATABASE_URL set + reachable; else no-op
+    try:
+        yield
+    finally:
+        await tdb.close_pool()
 
 
-def _require_token(x_service_token: str | None = Header(default=None)) -> None:
-    """Gate protected routes behind the shared service token when one is set.
-    Unset = open (loopback-only deploy); set the token to gate on a shared net."""
-    expected = os.environ.get("TOOL_WAREHOUSE_TOKEN")
-    if not expected:
+# Interactive docs OFF — this is a public surface; do not publish the route map /
+# admin attack surface / auth scheme to anonymous callers.
+app = FastAPI(
+    title="A.I.M.S. Tool Warehouse",
+    version="0.2.0",
+    lifespan=_lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+
+def require_scope(scope: str):
+    """Dependency factory: require `scope` (operator '*' satisfies any)."""
+    async def _dep(caller: Caller = Depends(resolve_caller)) -> Caller:
+        if "*" not in caller.scopes and scope not in caller.scopes:
+            raise HTTPException(status_code=403, detail=f"missing required scope: {scope}")
+        return caller
+    return _dep
+
+
+_CATALOG_READ = require_scope("catalog:read")
+
+
+async def _record(caller: Caller, endpoint: str, status: int = 200) -> None:
+    """Best-effort usage metering — never fails the request."""
+    if not tdb.tenancy_enabled():
         return
-    if x_service_token != expected:
-        raise HTTPException(status_code=401, detail="invalid or missing X-Service-Token")
+    try:
+        await tstore.record_usage(
+            key_id=caller.key_id, tenant_id=caller.tenant_id, endpoint=endpoint, status=status
+        )
+    except Exception:
+        pass
 
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    """Liveness of the service itself (no auth, no integration probe)."""
+    """Public liveness only — no auth/tenancy posture disclosure."""
     return {
         "service": "tool-warehouse",
         "status": "ok",
         "catalog_loaded": _warehouse is not None,
-        "total_tools": len(_warehouse.cards) if _warehouse is not None else 0,
-        "auth_required": bool(os.environ.get("TOOL_WAREHOUSE_TOKEN")),
     }
 
 
-@app.get("/tools", dependencies=[Depends(_require_token)])
+# --------------------------- catalog (tenant key OR operator token) ---------------------------
+@app.get("/tools")
 async def tools(
     category: str | None = None,
     certified: bool = False,
     q: str | None = None,
     limit: int = 500,
+    caller: Caller = Depends(_CATALOG_READ),
 ) -> dict[str, Any]:
-    """Filterable catalog query; live health joined for the deployed integration
-    tools present in the result set."""
+    await _record(caller, "/tools")
     if _warehouse is None:
         return {"loaded": False, "total": 0, "tools": []}
     return await query_tools(
-        _warehouse,
-        _registry,
-        category=category,
-        certified=certified,
-        q=q,
-        limit=limit,
+        _warehouse, _registry, category=category, certified=certified, q=q, limit=limit
     )
 
 
-@app.get("/categories", dependencies=[Depends(_require_token)])
-async def categories() -> dict[str, Any]:
-    """Per-category shelf rollup + canonical status rollup."""
+@app.get("/categories")
+async def categories(caller: Caller = Depends(_CATALOG_READ)) -> dict[str, Any]:
+    await _record(caller, "/categories")
     if _warehouse is None:
         return {"loaded": False, "categories": []}
     return category_rollup(_warehouse)
 
 
-@app.get("/select", dependencies=[Depends(_require_token)])
-async def select(category: str = Query(...)) -> dict[str, Any]:
-    """Certified-only source-of-record selection gate for a category."""
+@app.get("/select")
+async def select(category: str = Query(...), caller: Caller = Depends(_CATALOG_READ)) -> dict[str, Any]:
+    await _record(caller, "/select")
     if _warehouse is None:
-        return {
-            "loaded": False,
-            "category": category,
-            "can_select": False,
-            "certified_tools": [],
-        }
+        return {"loaded": False, "category": category, "can_select": False, "certified_tools": []}
     return select_certified(_warehouse, category)
 
 
-@app.get("/integrations/health", dependencies=[Depends(_require_token)])
-async def integrations_health() -> dict[str, Any]:
-    """Live availability of the deployed integration tools (concurrent, non-raising)."""
+@app.get("/integrations/health")
+async def integrations_health(caller: Caller = Depends(_CATALOG_READ)) -> dict[str, Any]:
+    await _record(caller, "/integrations/health")
     results = await _registry.health_check_all()
     return {
         "summary": {h.name: h.status for h in results},
         "integrations": [h.to_dict() for h in results],
     }
+
+
+# --------------------------- admin: status + tenants + keys (operator only) ---------------------------
+class TenantCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    slug: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    plan: str = Field(default="free", max_length=40)
+
+
+class KeyCreate(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    scopes: list[str] = Field(default_factory=lambda: ["catalog:read"])
+    expires_at: str | None = None  # ISO-8601; null = no expiry
+
+
+def _require_tenancy() -> None:
+    if not tdb.tenancy_enabled():
+        raise HTTPException(status_code=503, detail="tenancy not configured (WAREHOUSE_DATABASE_URL unset/unreachable)")
+
+
+@app.get("/admin/status", dependencies=[Depends(require_admin)])
+async def admin_status() -> dict[str, Any]:
+    """Operator-gated posture: tenancy/readiness incl. configured-but-down."""
+    return {
+        "service": "tool-warehouse",
+        "version": "0.2.0",
+        "catalog_loaded": _warehouse is not None,
+        "total_tools": len(_warehouse.cards) if _warehouse is not None else 0,
+        "auth_required": bool(os.environ.get("TOOL_WAREHOUSE_TOKEN")),
+        "db_configured": tdb.configured(),
+        "tenancy_enabled": tdb.tenancy_enabled(),
+        "degraded": tdb.degraded(),
+    }
+
+
+@app.post("/admin/tenants", dependencies=[Depends(require_admin)])
+async def admin_create_tenant(body: TenantCreate) -> dict[str, Any]:
+    _require_tenancy()
+    try:
+        return await tstore.create_tenant(body.name, body.slug, body.plan)
+    except Exception:
+        _log.exception("admin_create_tenant failed")
+        raise HTTPException(status_code=409, detail="could not create tenant (slug may already exist)")
+
+
+@app.get("/admin/tenants", dependencies=[Depends(require_admin)])
+async def admin_list_tenants() -> dict[str, Any]:
+    _require_tenancy()
+    return {"tenants": await tstore.list_tenants()}
+
+
+@app.post("/admin/tenants/{tenant_id}/keys", dependencies=[Depends(require_admin)])
+async def admin_mint_key(tenant_id: str, body: KeyCreate) -> dict[str, Any]:
+    _require_tenancy()
+    try:
+        return await tstore.mint_key(tenant_id, body.name, body.scopes, body.expires_at)
+    except Exception:
+        _log.exception("admin_mint_key failed")
+        raise HTTPException(status_code=400, detail="could not mint key (check tenant id / expires_at)")
+
+
+@app.get("/admin/tenants/{tenant_id}/keys", dependencies=[Depends(require_admin)])
+async def admin_list_keys(tenant_id: str) -> dict[str, Any]:
+    _require_tenancy()
+    try:
+        return {"keys": await tstore.list_keys(tenant_id)}
+    except Exception:
+        _log.exception("admin_list_keys failed")
+        raise HTTPException(status_code=400, detail="invalid tenant id")
+
+
+@app.post("/admin/keys/{key_id}/revoke", dependencies=[Depends(require_admin)])
+async def admin_revoke_key(key_id: str) -> dict[str, Any]:
+    _require_tenancy()
+    try:
+        ok = await tstore.revoke_key(key_id)
+    except Exception:
+        _log.exception("admin_revoke_key failed")
+        raise HTTPException(status_code=400, detail="invalid key id")
+    if not ok:
+        raise HTTPException(status_code=404, detail="key not found or already revoked")
+    return {"revoked": True, "key_id": key_id}
