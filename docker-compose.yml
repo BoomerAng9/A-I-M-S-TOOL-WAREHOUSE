@@ -1,0 +1,28 @@
+# A.I.M.S. Tool Warehouse — standalone deployment.
+#
+# Builds and runs the service on its own. Bind the host port to loopback and set
+# TOOL_WAREHOUSE_TOKEN to gate the catalog routes (see .env.example). Point
+# TOOL_WAREHOUSE_DATA at a mounted inventory file to serve the full catalog
+# instead of the bundled example seed.
+
+services:
+  tool-warehouse:
+    build: .
+    image: aims-tool-warehouse:latest
+    container_name: tool-warehouse
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8091:8090"
+    # Optional: mount a full inventory and point the service at it.
+    # volumes:
+    #   - ./data:/data:ro
+    # environment:
+    #   TOOL_WAREHOUSE_DATA: /data/foai-tool-inventory-log.jsonl
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
