@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from .integrations.catalog import category_rollup, query_tools, select_certified
@@ -102,6 +103,39 @@ async def _record(caller: Caller, endpoint: str, status: int = 200) -> None:
         )
     except Exception:
         pass
+
+
+_ROOT_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A.I.M.S. Tool Warehouse</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:#070707;color:#e8ffe8;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;padding:2rem}
+.card{max-width:640px;text-align:center}
+.tag{font-size:.7rem;letter-spacing:.32em;text-transform:uppercase;color:#39ff14;opacity:.85}
+h1{font-size:clamp(1.8rem,5vw,2.8rem);margin:.6rem 0 .3rem;letter-spacing:.04em}
+.sub{color:#7dffa0;opacity:.75;font-size:.8rem;letter-spacing:.2em;text-transform:uppercase;margin-bottom:1.6rem}
+p{color:#bdebbd;line-height:1.6;font-size:.95rem}
+code{background:#0f1a0f;border:1px solid #1f3a1f;color:#9dff9d;padding:.15rem .4rem;border-radius:4px;font-size:.85rem}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#39ff14;margin-right:.5rem;box-shadow:0 0 8px #39ff14}
+.foot{margin-top:2rem;font-size:.65rem;letter-spacing:.25em;text-transform:uppercase;color:#2f6b2f}
+</style></head>
+<body><div class="card">
+<div class="tag">AI Managed Solutions</div>
+<h1>A.I.M.S. Tool Warehouse</h1>
+<div class="sub"><span class="dot"></span>API service &middot; operational</div>
+<p>The standalone catalog of certified builder tools. Companies authenticate with an API key to browse and select certified tools &mdash; use the managed agent or bring your own.</p>
+<p style="margin-top:1.2rem;font-size:.85rem;opacity:.85">Programmatic access requires an API key:<br><code>Authorization: Bearer aimswh_&hellip;</code></p>
+<div class="foot">A.I.M.S. &middot; aimanagedsolutions.cloud</div>
+</div></body></html>"""
+
+
+@app.get("/", response_class=HTMLResponse)
+async def root() -> str:
+    """Public branded landing so the bare domain isn't a raw 404 (API-first; full UI later)."""
+    return _ROOT_HTML
 
 
 @app.get("/health")
