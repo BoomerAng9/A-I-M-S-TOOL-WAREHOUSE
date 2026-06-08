@@ -51,19 +51,21 @@ async def list_tenants() -> list[dict[str, Any]]:
         return [_tenant_row(r) for r in await cur.fetchall()]
 
 
-async def mint_key(tenant_id: str, name: Optional[str], scopes: list[str],
-                   expires_at: Optional[str]) -> dict[str, Any]:
+async def mint_key_on(conn, tenant_id: str, name: Optional[str], scopes: list[str],
+                      expires_at: Optional[str]) -> dict[str, Any]:
+    """Mint a key on a CALLER-SUPPLIED connection so the INSERT can participate in
+    the caller's transaction (the claim flow CAS-flips claimed_at + mints atomically,
+    so a failed mint rolls the claim back). Same return shape as ``mint_key``."""
     tid = _as_uuid(tenant_id)
     exp = _parse_ts(expires_at)
     full, prefix, secret_hash = keys.generate()
-    async with db.pool().connection() as conn:
-        cur = await conn.execute(
-            "INSERT INTO api_keys (tenant_id, name, key_prefix, key_hash, scopes, expires_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s) "
-            "RETURNING id, key_prefix, scopes, created_at, expires_at",
-            (tid, name, prefix, secret_hash, scopes or ["catalog:read"], exp),
-        )
-        r = await cur.fetchone()
+    cur = await conn.execute(
+        "INSERT INTO api_keys (tenant_id, name, key_prefix, key_hash, scopes, expires_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "RETURNING id, key_prefix, scopes, created_at, expires_at",
+        (tid, name, prefix, secret_hash, scopes or ["catalog:read"], exp),
+    )
+    r = await cur.fetchone()
     return {
         "id": str(r[0]),
         "tenant_id": tenant_id,
@@ -74,6 +76,12 @@ async def mint_key(tenant_id: str, name: Optional[str], scopes: list[str],
         "expires_at": _iso(r[4]),
         "note": "Store this api_key now — it is shown only once and cannot be recovered.",
     }
+
+
+async def mint_key(tenant_id: str, name: Optional[str], scopes: list[str],
+                   expires_at: Optional[str]) -> dict[str, Any]:
+    async with db.pool().connection() as conn:
+        return await mint_key_on(conn, tenant_id, name, scopes, expires_at)
 
 
 async def list_keys(tenant_id: str) -> list[dict[str, Any]]:
@@ -113,10 +121,16 @@ async def resolve_key(full_key: str) -> Optional[dict[str, Any]]:
         return None
     prefix, secret = parsed
     async with db.pool().connection() as conn:
+        # Enforcement point: the key is only valid while its tenant is 'active'.
+        # Billing suspends a tenant (cancel / refund / dispute / non-payment), which
+        # cuts access here WITHOUT touching the key — and re-activates on resubscribe.
+        # Existing tenants default to status='active', so this is non-breaking.
         cur = await conn.execute(
-            "SELECT id, tenant_id, key_hash, scopes FROM api_keys "
-            "WHERE key_prefix = %s AND revoked_at IS NULL "
-            "AND (expires_at IS NULL OR expires_at > now())",
+            "SELECT k.id, k.tenant_id, k.key_hash, k.scopes "
+            "FROM api_keys k JOIN tenants t ON t.id = k.tenant_id "
+            "WHERE k.key_prefix = %s AND k.revoked_at IS NULL "
+            "AND (k.expires_at IS NULL OR k.expires_at > now()) "
+            "AND t.status = 'active'",
             (prefix,),
         )
         r = await cur.fetchone()

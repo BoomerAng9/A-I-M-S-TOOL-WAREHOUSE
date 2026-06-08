@@ -57,6 +57,66 @@ CREATE TABLE IF NOT EXISTS usage_events (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS usage_events_tenant_idx ON usage_events (tenant_id, created_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- Billing (Stripe paywall). Additive + idempotent. Identity is the Stripe
+-- customer id (server-verified) — never the client-supplied email. The
+-- tenant `status` column (default 'active') is the enforcement point:
+-- store.resolve_key requires status='active', so suspend = access cut.
+-- ---------------------------------------------------------------------------
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_email  TEXT;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS usage_credits  BIGINT NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS billing_customers (
+    stripe_customer_id TEXT PRIMARY KEY,
+    tenant_id          UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    billing_email      TEXT,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (tenant_id)
+);
+
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id              UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    stripe_subscription_id TEXT UNIQUE NOT NULL,
+    plan                   TEXT NOT NULL,
+    status                 TEXT NOT NULL,
+    current_period_end     TIMESTAMPTZ,
+    event_created          BIGINT NOT NULL DEFAULT 0,   -- monotonic guard vs out-of-order events
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Webhook idempotency ledger: redelivery of the SAME event no-ops on this UNIQUE.
+-- Minimal columns (no full event payload) to avoid PII-at-rest.
+CREATE TABLE IF NOT EXISTS billing_events (
+    id              BIGSERIAL PRIMARY KEY,
+    stripe_event_id TEXT UNIQUE NOT NULL,
+    type            TEXT NOT NULL,
+    livemode        BOOLEAN,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- One row per Checkout Session. `claim_token_hash` (not the Stripe session id) is
+-- the capability the buyer presents to mint their key ONCE. `provisioned_at` is
+-- the shared exactly-once guard for the grant (webhook OR claim, whichever lands
+-- first); `claimed_at` is the single-use CAS flag for key minting.
+CREATE TABLE IF NOT EXISTS billing_sessions (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id       TEXT UNIQUE NOT NULL,
+    tenant_id        UUID REFERENCES tenants(id) ON DELETE SET NULL,
+    plan             TEXT NOT NULL,
+    commitment       INT  NOT NULL DEFAULT 1,
+    mode             TEXT NOT NULL,
+    claim_token_hash TEXT NOT NULL,
+    payment_status   TEXT,
+    provisioned_at   TIMESTAMPTZ,
+    claimed_at       TIMESTAMPTZ,
+    key_id           UUID,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS billing_sessions_token_idx ON billing_sessions (claim_token_hash);
+CREATE INDEX IF NOT EXISTS billing_customers_tenant_idx ON billing_customers (tenant_id);
 """
 
 

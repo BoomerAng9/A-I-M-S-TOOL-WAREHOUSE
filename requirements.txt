@@ -3,3 +3,4 @@ uvicorn[standard]>=0.49,<1.0
 httpx>=0.28,<1.0
 psycopg[binary]>=3.2,<4.0
 psycopg-pool>=3.2,<4.0
+stripe>=11,<13

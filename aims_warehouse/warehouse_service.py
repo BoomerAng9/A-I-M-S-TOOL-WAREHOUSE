@@ -33,6 +33,8 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from . import advisor
+from .billing import routes as billing_routes
+from .billing import stripe_gateway as billing_gw
 from .integrations.catalog import category_rollup, query_tools, select_certified
 from .integrations.registry import IntegrationRegistry
 from .picker_ang.tool_warehouse import ToolWarehouse
@@ -80,6 +82,12 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+
+# Mount the Stripe paywall (pricing page, checkout, webhook, claim). The router
+# degrades to 503 on its money-moving routes until STRIPE_SECRET_KEY / _WEBHOOK_SECRET
+# are placed in the environment — so mounting it never breaks the live service.
+app.include_router(billing_routes.router)
 
 
 def require_scope(scope: str):
@@ -237,6 +245,11 @@ async def admin_status() -> dict[str, Any]:
         "db_configured": tdb.configured(),
         "tenancy_enabled": tdb.tenancy_enabled(),
         "degraded": tdb.degraded(),
+        "billing": {
+            "stripe_configured": billing_gw.secret_configured(),
+            "webhook_configured": billing_gw.webhook_configured(),
+            "stripe_mode": billing_gw.mode(),  # live | test | unknown — catches a test-key-in-prod misconfig
+        },
     }
 
 
