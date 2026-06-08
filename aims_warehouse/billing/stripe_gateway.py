@@ -128,10 +128,12 @@ def create_checkout_session(
         params["customer_email"] = email
     if ck_mode == "payment":
         # Guarantee a Customer object exists for one-time buys so we can dedup later.
+        # aimswh_src=checkout tags OUR PaymentIntents so the webhook's payment_intent.succeeded
+        # handler skips them (they deliver via the claim page) and only emails EXTERNAL ones.
         params["customer_creation"] = "always"
-        params["payment_intent_data"] = {"metadata": {"plan": plan_slug}}
+        params["payment_intent_data"] = {"metadata": {"plan": plan_slug, "aimswh_src": "checkout"}}
     else:
-        params["subscription_data"] = {"metadata": {"plan": plan_slug, "commitment": str(commitment)}}
+        params["subscription_data"] = {"metadata": {"plan": plan_slug, "commitment": str(commitment), "aimswh_src": "checkout"}}
 
     session = stripe.checkout.Session.create(idempotency_key=idempotency_key, **params)
     return session

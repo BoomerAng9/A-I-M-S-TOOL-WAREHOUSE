@@ -24,6 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from ..tenancy import db
+from . import email as email_mod
 from . import pricing, provision
 from . import stripe_gateway as gw
 
@@ -214,6 +215,7 @@ async def webhook(request: Request) -> Response:
         # Stray test/live event for the wrong mode — ack so Stripe stops retrying.
         return JSONResponse({"received": True, "ignored": "livemode"}, status_code=200)
 
+    delivery = None
     try:
         async with db.pool().connection() as conn:
             async with conn.transaction():
@@ -221,11 +223,20 @@ async def webhook(request: Request) -> Response:
                     conn, event.get("id"), event.get("type", ""), event.get("livemode")
                 )
                 if is_new:
-                    await provision.handle_event(conn, event)
+                    delivery = await provision.handle_event(conn, event)
     except Exception:
         # Roll back BOTH the ledger row and the work; 5xx so Stripe redelivers.
         _log.exception("webhook processing failed for event %s", event.get("id"))
         return JSONResponse({"detail": "processing error"}, status_code=500)
+    # External (Paperform) payments have no claim page -> email the minted key AFTER the
+    # commit (never inside the txn — it's a network call; a send failure won't 5xx, the
+    # tenant is already provisioned and the operator can re-mint from /admin).
+    if delivery and delivery.get("api_key") and delivery.get("email"):
+        sent = email_mod.send_api_key(
+            delivery["email"], delivery["api_key"], delivery.get("plan_label", "your"), gw.public_url()
+        )
+        if not sent:
+            _log.error("KEY EMAIL FAILED for %s (tenant provisioned; re-mint via /admin)", delivery["email"])
     return JSONResponse({"received": True}, status_code=200)
 
 

@@ -66,6 +66,15 @@ def _email_from_session(session: dict[str, Any]) -> Optional[str]:
     return details.get("email") or session.get("customer_email")
 
 
+def _email_from_pi(pi: dict[str, Any]) -> Optional[str]:
+    if pi.get("receipt_email"):
+        return pi["receipt_email"]
+    try:
+        return ((pi.get("charges") or {}).get("data") or [{}])[0].get("billing_details", {}).get("email")
+    except Exception:
+        return None
+
+
 # --------------------------------------------------------------------------- events ledger
 async def record_event(conn, event_id: str, etype: str, livemode: Optional[bool]) -> bool:
     """Claim this event id. Returns True if NEW (proceed), False if already processed
@@ -204,6 +213,54 @@ async def grant_for_session(conn, session: dict[str, Any]) -> Optional[str]:
     return tenant_id
 
 
+# --------------------------------------------------------------------------- external payments (Paperform / payment links)
+async def provision_external(conn, ext_id: str, customer_id: Optional[str], email: Optional[str],
+                             amount_cents: Optional[int], currency: Optional[str]) -> Optional[dict[str, Any]]:
+    """Provision a tenant for an EXTERNAL paid Stripe payment (a Paperform stepper or a
+    payment link) that did NOT come through our /billing/checkout — so there is no claim
+    page to show the key on. Idempotent on ext_id. Mints the key and returns
+    {api_key, email, plan, plan_label} for the route to EMAIL, or None if already
+    processed / amount unrecognised. The amount must exactly match a known plan price."""
+    if not ext_id:
+        return None
+    if currency and currency.lower() != pricing.CURRENCY:
+        _log.warning("external payment %s currency %s != usd; skipping", ext_id, currency)
+        return None
+    plan = pricing.plan_for_amount(amount_cents)
+    if not plan:
+        _log.warning("external payment %s amount %s matches no plan; skipping", ext_id, amount_cents)
+        return None
+    # Idempotency: a synthetic billing_sessions row keyed by the external payment id.
+    token = secrets.token_urlsafe(16)
+    cur = await conn.execute(
+        "INSERT INTO billing_sessions (session_id, plan, commitment, mode, claim_token_hash, "
+        "payment_status, provisioned_at) VALUES (%s, %s, 1, 'payment', %s, 'paid', now()) "
+        "ON CONFLICT (session_id) DO NOTHING RETURNING id",
+        (ext_id, plan, token_hash(token)),
+    )
+    bs = await cur.fetchone()
+    if bs is None:
+        return None  # redelivery — already provisioned
+    bs_id = bs[0]
+    # No Stripe customer on the payment? Each external one-time is its own identity.
+    cust = customer_id or f"ext:{ext_id}"
+    tenant_id = await find_or_create_tenant(conn, cust, email)
+    if plan == "coffee":
+        await conn.execute(
+            "UPDATE tenants SET plan='coffee', status='active', usage_credits = usage_credits + %s WHERE id=%s",
+            (pricing.coffee_credits(), tenant_id),
+        )
+    else:
+        await _set_plan(conn, tenant_id, plan)
+    minted = await store.mint_key_on(conn, tenant_id, name="paperform", scopes=["catalog:read"], expires_at=None)
+    await conn.execute(
+        "UPDATE billing_sessions SET tenant_id=%s, key_id=%s, claimed_at=now() WHERE id=%s",
+        (tenant_id, minted["id"], bs_id),
+    )
+    _log.info("external payment %s -> tenant %s plan %s (emailing key)", ext_id, tenant_id, plan)
+    return {"api_key": minted["api_key"], "email": email, "plan": plan, "plan_label": pricing.label(plan)}
+
+
 # --------------------------------------------------------------------------- subscriptions
 async def apply_subscription(conn, sub: dict[str, Any], event_created: int) -> None:
     """Upsert subscription state with a monotonic guard (events can arrive out of order)."""
@@ -273,10 +330,14 @@ async def suspend_for_charge(conn, charge: dict[str, Any], reason: str) -> None:
 
 
 # --------------------------------------------------------------------------- webhook dispatch
-async def handle_event(conn, event: dict[str, Any]) -> None:
+async def handle_event(conn, event: dict[str, Any]) -> Optional[dict[str, Any]]:
     """Dispatch a VERIFIED Stripe event. Raises on failure so the route returns 5xx
     (Stripe will retry) — and because everything is in the caller's transaction, the
-    event-ledger row rolls back too, so the retry re-processes cleanly."""
+    event-ledger row rolls back too, so the retry re-processes cleanly.
+
+    Returns a {api_key, email, plan_label} DELIVERY PAYLOAD when an EXTERNAL payment
+    (Paperform / payment link) minted a key that the route must EMAIL — otherwise None
+    (our own checkout delivers via the in-app claim page, not email)."""
     etype = event.get("type", "")
     obj = (event.get("data") or {}).get("object") or {}
     created = int(event.get("created") or 0)
@@ -290,6 +351,16 @@ async def handle_event(conn, event: dict[str, Any]) -> None:
                 "UPDATE billing_sessions SET payment_status = %s WHERE session_id = %s",
                 (obj.get("payment_status"), obj.get("id")),
             )
+    elif etype == "payment_intent.succeeded":
+        # Our own checkout PIs are tagged aimswh_src=checkout -> handled via the session/
+        # claim path; do NOT double-provision. Untagged PIs are EXTERNAL (Paperform /
+        # payment link): provision + mint + return the key for the route to email.
+        if (obj.get("metadata") or {}).get("aimswh_src") == "checkout":
+            return None
+        return await provision_external(
+            conn, obj.get("id"), _obj_id(obj.get("customer")), _email_from_pi(obj),
+            obj.get("amount"), obj.get("currency"),
+        )
     elif etype == "checkout.session.async_payment_failed":
         await conn.execute(
             "UPDATE billing_sessions SET payment_status = 'failed' WHERE session_id = %s", (obj.get("id"),)
@@ -313,6 +384,7 @@ async def handle_event(conn, event: dict[str, Any]) -> None:
                 _log.exception("charge.dispute.created: could not resolve charge %s for suspension", charge_id)
     else:
         _log.debug("ignoring event type %s", etype)
+    return None
 
 
 # --------------------------------------------------------------------------- claim (mint once)

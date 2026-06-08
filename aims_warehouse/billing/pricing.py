@@ -156,6 +156,24 @@ def dollars(amount_cents: int) -> str:
     return f"${amount_cents / 100:,.2f}"
 
 
+def plan_for_amount(amount_cents: int) -> Optional[str]:
+    """Reverse-map a paid amount (cents) to a plan slug — for EXTERNAL payments
+    (Paperform / payment links) that don't carry our metadata. Exact match only; an
+    unrecognised amount returns None so the caller refuses rather than guesses."""
+    if amount_cents is None:
+        return None
+    for slug, plan in PLANS.items():
+        for p in plan["prices"]:
+            if p["amount_cents"] == amount_cents:
+                return slug
+    return None
+
+
+def label(slug: str) -> str:
+    plan = PLANS.get(slug)
+    return plan["display_name"] if plan else slug
+
+
 def all_lookup_keys() -> list[dict[str, Any]]:
     """Every (plan, price) bootstrap must ensure exists in Stripe."""
     out: list[dict[str, Any]] = []
