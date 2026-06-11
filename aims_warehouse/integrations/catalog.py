@@ -12,6 +12,7 @@ reads picker_ang types.
 """
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 from ..picker_ang.tool_warehouse import ToolStatus
@@ -95,7 +96,11 @@ async def query_tools(
             c for c in cards
             if ql in c.name.lower() or ql in c.category.lower() or ql in (c.note or "").lower()
         ]
-    cards = cards[: max(1, min(limit, 1000))]
+    # Result cap. Was a hard 1000; now env-configurable so the full 14k catalog is
+    # addressable (operators/Charlotte page deeper). Still bounded to protect the
+    # public API from an unbounded dump.
+    _cap = int(os.environ.get("WAREHOUSE_MAX_LIMIT", "20000"))
+    cards = cards[: max(1, min(limit, _cap))]
     integ_names = set(registry.available_tools())
     health: dict[str, Any] = {}
     if any(c.name in integ_names for c in cards):
