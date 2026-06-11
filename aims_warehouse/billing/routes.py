@@ -13,7 +13,9 @@ query string); checkout strictly validates plan/commitment and is rate-limited.
 """
 from __future__ import annotations
 
+import hmac
 import logging
+import os
 import secrets
 import time
 import uuid
@@ -238,6 +240,93 @@ async def webhook(request: Request) -> Response:
         if not sent:
             _log.error("KEY EMAIL FAILED for %s (tenant provisioned; re-mint via /admin)", delivery["email"])
     return JSONResponse({"received": True}, status_code=200)
+
+
+# =========================================================================== paperform webhook
+#
+# A Paperform stepper holds the Stripe connection on ITS side (no sk_live_ in our code),
+# collects the payment, and POSTs its submission here. We verify a shared secret (set the
+# same value as a custom header `X-Webhook-Secret` in the Paperform webhook config — Paperform
+# supports custom headers), parse the submission's email + Stripe `charge`, and hand off to
+# the existing idempotent `provision_external` (amount->plan, mint key, exactly-once on the
+# submission id). Fail CLOSED: no secret configured -> never process.
+
+
+def _paperform_secret_state(request: Request) -> Optional[bool]:
+    """None = not configured (503); True/False = secret match result."""
+    expected = os.environ.get("PAPERFORM_WEBHOOK_SECRET", "")
+    if not expected:
+        return None
+    provided = request.headers.get("x-webhook-secret") or request.query_params.get("secret") or ""
+    return hmac.compare_digest(provided, expected)
+
+
+def _paperform_extract(payload: dict[str, Any]) -> dict[str, Any]:
+    """Pull (submission_id, email, amount_cents, currency, paid) from a Paperform
+    submission webhook. `data` is an array of question objects; `charge` is the Stripe
+    charge (present only when the form took a payment)."""
+    sub_id = str(payload.get("submission_id") or payload.get("id") or "").strip()
+    email: Optional[str] = None
+    for q in payload.get("data") or []:
+        if not isinstance(q, dict):
+            continue
+        ckey = str(q.get("custom_key") or "").lower()
+        if (q.get("type") == "email" or ckey in ("email", "billing_email")) and q.get("value"):
+            email = str(q.get("value")).strip().lower()
+            break
+    charge = payload.get("charge") if isinstance(payload.get("charge"), dict) else {}
+    amount = charge.get("amount") or charge.get("amount_total")
+    currency = charge.get("currency")
+    status = charge.get("status")
+    paid = bool(charge) and charge.get("paid", True) and status in (None, "succeeded", "paid")
+    if not email:
+        bd = charge.get("billing_details") or {}
+        cand = (bd.get("email") or charge.get("receipt_email") or "").strip().lower()
+        email = cand or None
+    return {"sub_id": sub_id, "email": email, "amount": amount, "currency": currency,
+            "has_charge": bool(charge), "paid": paid}
+
+
+@router.post("/billing/paperform-webhook")
+async def paperform_webhook(request: Request) -> Response:
+    state = _paperform_secret_state(request)
+    if state is None:
+        return JSONResponse({"detail": "paperform webhook not configured"}, status_code=503)
+    if not state:
+        return JSONResponse({"detail": "invalid secret"}, status_code=401)
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"detail": "invalid json"}, status_code=400)
+
+    f = _paperform_extract(payload)
+    if not f["sub_id"]:
+        return JSONResponse({"detail": "no submission id"}, status_code=400)
+    # Only a real PAID charge provisions. No charge / unpaid -> ack (so Paperform stops
+    # retrying) without granting anything.
+    if not (f["has_charge"] and f["paid"] and f["amount"] and f["email"]):
+        return JSONResponse({"received": True, "provisioned": False, "reason": "no paid charge / no email"}, status_code=200)
+
+    delivery = None
+    try:
+        async with db.pool().connection() as conn:
+            async with conn.transaction():
+                delivery = await provision.provision_external(
+                    conn, ext_id=f"pf:{f['sub_id']}", customer_id=None, email=f["email"],
+                    amount_cents=int(f["amount"]), currency=f["currency"],
+                )
+    except Exception:
+        _log.exception("paperform webhook provisioning failed for %s", f["sub_id"])
+        return JSONResponse({"detail": "processing error"}, status_code=500)
+
+    # External payment has no in-app claim page -> email the minted key after commit.
+    if delivery and delivery.get("api_key") and delivery.get("email"):
+        sent = email_mod.send_api_key(
+            delivery["email"], delivery["api_key"], delivery.get("plan_label", "your"), gw.public_url()
+        )
+        if not sent:
+            _log.error("paperform KEY EMAIL FAILED for %s (tenant provisioned; re-mint via /admin)", delivery["email"])
+    return JSONResponse({"received": True, "provisioned": bool(delivery)}, status_code=200)
 
 
 # =========================================================================== success page

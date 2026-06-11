@@ -314,7 +314,18 @@ async def account(request: Request):
         resp = RedirectResponse("/app/signin", status_code=302)
         resp.delete_cookie(sessions.SESSION_COOKIE, path="/")
         return resp
-    return templates.TemplateResponse(request, "account.html", {**ctx, "email": sess["email"]})
+    # Upgrade → the Paperform stepper (Stripe lives on Paperform's side), email pre-filled
+    # so the payment ties back to this tenant. Falls back to the native pricing page.
+    import urllib.parse as _up
+    _pf = os.environ.get("PAPERFORM_FORM_URL", "").strip()
+    if _pf:
+        _sep = "&" if "?" in _pf else "?"
+        upgrade_url = f"{_pf}{_sep}email={_up.quote(sess['email'])}"
+    else:
+        upgrade_url = "/billing/pricing"
+    return templates.TemplateResponse(
+        request, "account.html", {**ctx, "email": sess["email"], "upgrade_url": upgrade_url}
+    )
 
 
 @frontend_router.post("/keys", response_class=HTMLResponse)

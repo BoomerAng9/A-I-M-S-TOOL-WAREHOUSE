@@ -45,9 +45,9 @@
       <p class="billing-line">Current plan: <strong class="accent">{{ tenant.plan|upper }}</strong></p>
       <p class="billing-line">Token credits: <strong>{{ tenant.usage_credits }}</strong></p>
       <div class="billing-actions">
-        <a href="/billing/pricing" class="auth-btn small">Upgrade plan</a>
+        <a href="{{ upgrade_url }}" class="auth-btn small">Upgrade plan</a>
       </div>
-      <p class="auth-foot">Checkout runs in test mode; webhook-verified provisioning is live.</p>
+      <p class="auth-foot">Secure checkout via Paperform + Stripe. Your key is emailed on payment and appears here.</p>
     </div>
   </div>
 </section>
