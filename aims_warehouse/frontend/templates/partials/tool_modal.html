@@ -1,0 +1,96 @@
+{# Tool modal partial — htmx target: #modal-target
+   Displays one tool card detail. Redaction has already run in the router:
+   source_shelf is NOT present. Only TENANT_CARD_FIELDS survive.
+#}
+{% if tool %}
+<div class="modal-overlay" onclick="if(event.target===this)closeModal()" role="dialog" aria-modal="true" aria-label="{{ tool.name }}">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeModal()" aria-label="Close">&times; close</button>
+
+    <div class="modal-name">{{ tool.name }}</div>
+
+    <div class="modal-row">
+      <span class="badge {{ tool._verdict_class }}">{{ tool.display_status or tool.verdict }}</span>
+      <span>{{ tool.category }}</span>
+      {% if tool.type %}
+      <span>&middot; {{ tool.type }}</span>
+      {% endif %}
+      {% if tool.version %}
+      <span>&middot; v{{ tool.version }}</span>
+      {% endif %}
+    </div>
+
+    <hr class="modal-divider">
+
+    {% if tool.install %}
+    <div class="modal-field">
+      <div class="modal-field-label">install</div>
+      <div class="modal-field-value">
+        <code>{{ tool.install }}</code>
+      </div>
+    </div>
+    {% endif %}
+
+    {% if tool.origin %}
+    <div class="modal-field">
+      <div class="modal-field-label">origin</div>
+      <div class="modal-field-value">{{ tool.origin }}</div>
+    </div>
+    {% endif %}
+
+    {% if tool.layer %}
+    <div class="modal-field">
+      <div class="modal-field-label">layer</div>
+      <div class="modal-field-value">{{ tool.layer }}</div>
+    </div>
+    {% endif %}
+
+    {% if tool.note %}
+    <div class="modal-field">
+      <div class="modal-field-label">note</div>
+      <div class="modal-field-value">{{ tool.note }}</div>
+    </div>
+    {% endif %}
+
+    {% if not tool.install and not tool.origin and not tool.note %}
+    <div class="modal-field">
+      <div class="modal-field-value muted">no additional details available</div>
+    </div>
+    {% endif %}
+
+    {# Add to stack — client-side Alpine/localStorage #}
+    <button
+      class="stack-btn"
+      id="stack-btn-{{ tool.name | replace(' ', '-') | replace('/', '-') }}"
+      onclick="handleStackBtn(this, '{{ tool.name | e }}', '{{ tool.category | e }}')"
+    >+ add to stack</button>
+
+    <script>
+    // Update button state if tool is already in stack
+    (function() {
+      var name = {{ tool.name | tojson }};
+      var btnId = 'stack-btn-' + name.replace(/[\s\/]/g, '-');
+      var btn = document.getElementById(btnId);
+      if (!btn) return;
+      try {
+        var stack = JSON.parse(localStorage.getItem('aims_stack') || '[]');
+        if (stack.some(function(t) { return t.name === name; })) {
+          btn.textContent = '✓ in stack';
+          btn.classList.add('in-stack');
+        }
+      } catch(e) {}
+    })();
+    </script>
+  </div>
+</div>
+{% else %}
+<div class="modal-overlay" onclick="if(event.target===this)closeModal()" role="dialog" aria-modal="true">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeModal()" aria-label="Close">&times; close</button>
+    <div class="modal-name" style="color:var(--dim)">tool not found</div>
+    <div style="font-size:.65rem;color:var(--dim);margin-top:.8rem">
+      &ldquo;{{ query_name }}&rdquo; did not match any catalog record.
+    </div>
+  </div>
+</div>
+{% endif %}

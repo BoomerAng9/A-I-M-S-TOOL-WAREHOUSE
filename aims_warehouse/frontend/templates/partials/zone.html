@@ -1,0 +1,64 @@
+{# Zone panel partial — htmx target: #zone-panel
+   Shows paginated certified-first tool grid for one shelf-zone.
+   All tools have already been redacted via redact_payload(..., "tenant") in the router.
+   source_shelf is NOT present in any tool dict here — Sacred Separation holds.
+#}
+<div class="zone-panel">
+  <div class="zone-panel-header">
+    <h2>{{ category }}</h2>
+    <span class="zone-panel-count">{{ raw_total }} tools</span>
+    <button class="zone-panel-close" onclick="closeZone()" aria-label="Close zone panel">&times; close</button>
+  </div>
+
+  {% if tools %}
+  <div class="tool-grid" role="list">
+    {% for tool in tools %}
+    <div
+      class="tool-card"
+      role="listitem"
+      onclick="openTool('{{ tool.name | e }}')"
+      onkeydown="if(event.key==='Enter'||event.key===' ')openTool('{{ tool.name | e }}')"
+      tabindex="0"
+      aria-label="{{ tool.name }}"
+    >
+      <div class="tool-card-name" title="{{ tool.name }}">{{ tool.name }}</div>
+      <div class="tool-card-meta">
+        <span class="badge {{ tool._verdict_class }}">{{ tool.display_status or tool.verdict }}</span>
+        {% if tool.type %}
+        <span>{{ tool.type }}</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div style="padding:1.5rem 0;font-size:.62rem;color:var(--dim);letter-spacing:.12em;text-transform:uppercase">
+    no tools found in this zone
+  </div>
+  {% endif %}
+
+  {# Pagination #}
+  {% if total_pages > 1 %}
+  <nav class="zone-pagination" aria-label="Zone pagination">
+    {% if prev_page is not none %}
+    <a
+      href="#"
+      hx-get="/app/zone/{{ category | urlencode }}?page={{ prev_page }}"
+      hx-target="#zone-panel"
+      hx-swap="innerHTML"
+      aria-label="Previous page"
+    >&larr; prev</a>
+    {% endif %}
+    <span>page {{ page + 1 }} / {{ total_pages }}</span>
+    {% if next_page is not none %}
+    <a
+      href="#"
+      hx-get="/app/zone/{{ category | urlencode }}?page={{ next_page }}"
+      hx-target="#zone-panel"
+      hx-swap="innerHTML"
+      aria-label="Next page"
+    >next &rarr;</a>
+    {% endif %}
+  </nav>
+  {% endif %}
+</div>

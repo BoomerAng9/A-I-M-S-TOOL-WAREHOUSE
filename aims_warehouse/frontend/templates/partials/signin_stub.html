@@ -1,0 +1,18 @@
+{# Sign-in stub — full page served via TemplateResponse("partials/signin_stub.html")
+   which extends base.html. Auth is a later increment.
+#}
+{% extends "base.html" %}
+{% block title %}A.I.M.S. Tool Warehouse — Sign In{% endblock %}
+{% block content %}
+<div class="stub-wrap">
+  <div class="stub-card">
+    <div class="stub-tag">A.I. Managed Solutions</div>
+    <h1 class="stub-h">Account access</h1>
+    <p class="stub-p">
+      Tenant sign-in is coming in the next increment.<br>
+      API key access is already live — authenticate with:<br>
+      <code style="display:inline-block;margin-top:.5rem;font-family:var(--font);font-size:.62rem;color:var(--soft);background:var(--panel);border:1px solid var(--line);padding:.2rem .5rem">Authorization: Bearer aimswh_…</code>
+    </p>
+  </div>
+</div>
+{% endblock %}

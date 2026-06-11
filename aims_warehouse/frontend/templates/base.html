@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#070707">
+  <title>{% block title %}A.I.M.S. Tool Warehouse{% endblock %}</title>
+  <meta name="description" content="The A.I.M.S. catalog of certified builder tools — 14,049 tools across 24 shelf-zones.">
+  <link rel="stylesheet" href="/static/aims.css">
+
+  {# htmx — zero-build interactivity #}
+  <script src="https://unpkg.com/htmx.org@2.0.3/dist/htmx.min.js" defer></script>
+
+  {# Alpine.js — reactive UI state (command palette, stack) #}
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+
+  {# lottie-player — for richer Lottie scenes; the hero uses rAF ticker but this stays for future drop-ins #}
+  <script src="https://unpkg.com/@lottiefiles/lottie-player@2.0.8/dist/lottie-player.js" defer></script>
+
+  {% block head_extra %}{% endblock %}
+</head>
+<body>
+
+  {# Top bar — always present #}
+  <header class="topbar">
+    <a href="/app/" class="topbar-brand">
+      <span class="dot"></span>
+      <span>A.I.M.S.</span>
+      <strong>Tool Warehouse</strong>
+    </a>
+
+    <nav class="topbar-right">
+      <button
+        class="kbd-hint"
+        onclick="document.dispatchEvent(new KeyboardEvent('keydown',{key:'k',ctrlKey:true,bubbles:true}))"
+        aria-label="Open command palette (Ctrl+K)"
+      >
+        <kbd>Ctrl</kbd><span>+</span><kbd>K</kbd>
+        <span>search</span>
+      </button>
+      <a href="/app/signin" class="signin-link">[ sign in ]</a>
+    </nav>
+  </header>
+
+  {# Command palette — Alpine-managed overlay, htmx-fetched results #}
+  <div x-data="palette()" x-init="init()" id="palette-root">
+    <div
+      class="palette-overlay"
+      x-show="open"
+      x-transition:enter="transition ease-out duration-100"
+      x-transition:enter-start="opacity-0"
+      x-transition:enter-end="opacity-100"
+      x-transition:leave="transition ease-in duration-80"
+      x-transition:leave-start="opacity-100"
+      x-transition:leave-end="opacity-0"
+      x-cloak
+      @click.self="close()"
+      style="display:none"
+    >
+      <div class="palette-box" role="dialog" aria-label="Command palette">
+        <div class="palette-input-row">
+          <span class="palette-prompt">&gt;_</span>
+          <input
+            type="search"
+            class="palette-input"
+            placeholder="search tools, categories…"
+            autocomplete="off"
+            spellcheck="false"
+            x-model="query"
+            @input="onInput()"
+            @keydown="onKeydown($event)"
+            aria-label="Search tools"
+          >
+          <span class="palette-esc">esc</span>
+        </div>
+
+        <div class="palette-results" id="palette-results-target">
+          {# htmx fills this via /app/search?q= #}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# Modal target — htmx swaps tool detail here #}
+  <div id="modal-target"></div>
+
+  {# Zone panel — htmx swaps zone grid here (below the floor grid) #}
+  <div id="zone-panel" style="display:none"></div>
+
+  {# Main content #}
+  <main id="main-content">
+    {% block content %}{% endblock %}
+  </main>
+
+  <script src="/static/app.js"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

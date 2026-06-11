@@ -1,0 +1,24 @@
+{# Search results partial — htmx target: #palette-results-target
+   Server-side filtered results for the command palette.
+   All tools redacted via redact_payload(..., "tenant").
+#}
+{% if q and results %}
+{% for tool in results %}
+<div
+  class="palette-result-item"
+  onclick="openTool('{{ tool.name | e }}'); document.dispatchEvent(new CustomEvent('palette-close'));"
+  onkeydown="if(event.key==='Enter'){ openTool('{{ tool.name | e }}'); }"
+  tabindex="0"
+  role="option"
+  aria-label="{{ tool.name }} — {{ tool.category }}"
+>
+  <span class="badge {{ tool._verdict_class | default('verdict-review') }}">{{ tool.display_status or tool.verdict }}</span>
+  <span class="palette-res-name" title="{{ tool.name }}">{{ tool.name }}</span>
+  <span class="palette-res-cat">{{ tool.category }}</span>
+</div>
+{% endfor %}
+{% elif q %}
+<div class="palette-empty">no results for &ldquo;{{ q }}&rdquo;</div>
+{% else %}
+<div class="palette-empty">type to search the catalog</div>
+{% endif %}

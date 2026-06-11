@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+
+{% block title %}A.I.M.S. Tool Warehouse — Living Floor{% endblock %}
+
+{% block content %}
+
+{# ─── Hero ──────────────────────────────────────────────────────────────────── #}
+<section class="hero">
+  <div class="hero-tag">A.I. Managed Solutions &middot; Catalog</div>
+
+  <div class="hero-count-wrap">
+    <span
+      id="hero-count"
+      class="hero-count"
+      data-target="{{ total_tools }}"
+      aria-label="{{ total_tools }} tools in catalog"
+    >{{ total_tools }}</span>
+  </div>
+
+  <div class="hero-label">tools catalogued</div>
+  <div class="hero-sub">{{ zones | length }} shelf-zones &middot; warehouse floor</div>
+
+  {% if certified_count > 0 %}
+  <div class="hero-certified">
+    <span>{{ certified_count }}</span> verified &amp; build-ready
+  </div>
+  {% endif %}
+
+  {# Ctrl+K affordance — doubles as palette trigger #}
+  <button
+    class="palette-trigger"
+    onclick="document.dispatchEvent(new KeyboardEvent('keydown',{key:'k',ctrlKey:true,bubbles:true}))"
+    aria-label="Open command palette"
+  >
+    <kbd>Ctrl</kbd><span>+</span><kbd>K</kbd>
+    <span>to search the catalog</span>
+  </button>
+</section>
+
+{# ─── Shelf-zone floor grid ─────────────────────────────────────────────────── #}
+<div class="floor-header">
+  <h2>shelf zones</h2>
+  <div class="floor-divider" role="separator"></div>
+  <span style="font-size:.55rem;letter-spacing:.12em;text-transform:uppercase;color:var(--dim)">
+    {{ zones | length }} categories
+  </span>
+</div>
+
+{# Zone panel slot — htmx injects the zone detail here when a zone is clicked.
+   It lives between the floor header and the grid so the panel flows after the header. #}
+<div id="zone-panel" style="display:none" aria-live="polite"></div>
+
+<div class="floor-grid" id="floor-grid" role="list">
+  {% for zone in zones %}
+  {# Health class controls left-edge glow #}
+  {% set hclass = "health-" ~ zone.health %}
+  <div
+    class="zone-card {{ hclass }}"
+    role="listitem"
+    title="{{ zone.name }} — {{ zone.certified }} verified / {{ zone.total }} total"
+    onclick="openZone('{{ zone.name | e }}')"
+    onkeydown="if(event.key==='Enter'||event.key===' ')openZone('{{ zone.name | e }}')"
+    tabindex="0"
+    aria-label="{{ zone.name }}: {{ zone.certified }} verified tools"
+  >
+    {# Health dot top-right #}
+    <div class="zone-health-dot" aria-hidden="true"></div>
+
+    {# Zone name #}
+    <div class="zone-name">{{ zone.name }}</div>
+
+    {# Fill bar — width driven by CSS var, animated by app.js initFillBars() #}
+    <div class="zone-fill-track" aria-hidden="true">
+      <div
+        class="zone-fill-bar"
+        data-fill="{{ zone.fill_pct }}"
+        style="--fill-pct: 0%"
+        title="{{ zone.certified }} verified"
+      ></div>
+    </div>
+
+    {# Counts #}
+    <div class="zone-counts">
+      <span class="certified-n">{{ zone.certified }}</span>
+      <span>verified</span>
+      <span class="sep">/</span>
+      <span>{{ zone.total }}</span>
+    </div>
+
+    {# Idle SVG wave — subtle ambient motion #}
+    <div class="zone-idle-wave" aria-hidden="true">
+      <svg viewBox="0 0 440 18" preserveAspectRatio="none" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path class="wave-path"
+          d="M0,9 C20,2 40,16 60,9 C80,2 100,16 120,9 C140,2 160,16 180,9 C200,2 220,16 240,9 C260,2 280,16 300,9 C320,2 340,16 360,9 C380,2 400,16 420,9 C440,2 460,16 480,9 C500,2 520,16 540,9"
+          stroke="#39ff14" stroke-width="1.5"
+        />
+      </svg>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+{% if not catalog_loaded %}
+<div style="text-align:center;padding:3rem;font-size:.65rem;color:var(--dim);letter-spacing:.2em;text-transform:uppercase">
+  catalog offline — service starting
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Kick off fill-bar animation as soon as the floor grid is in the DOM
+// (initFillBars is also called from DOMContentLoaded in app.js, but belt + suspenders)
+document.addEventListener('DOMContentLoaded', function() {
+  // Small delay so CSS transition has registered
+  setTimeout(function() {
+    var bars = document.querySelectorAll('.zone-fill-bar[data-fill]');
+    bars.forEach(function(bar) {
+      bar.style.setProperty('--fill-pct', bar.dataset.fill + '%');
+    });
+  }, 80);
+});
+</script>
+{% endblock %}
