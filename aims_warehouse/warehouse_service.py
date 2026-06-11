@@ -33,6 +33,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from . import advisor
+from .redaction import redact_payload
 from .billing import routes as billing_routes
 from .billing import stripe_gateway as billing_gw
 from .integrations.catalog import category_rollup, query_tools, select_certified
@@ -169,9 +170,10 @@ async def tools(
     await _record(caller, "/tools")
     if _warehouse is None:
         return {"loaded": False, "total": 0, "tools": []}
-    return await query_tools(
+    data = await query_tools(
         _warehouse, _registry, category=category, certified=certified, q=q, limit=limit
     )
+    return redact_payload(data, caller.kind)
 
 
 @app.get("/categories")
@@ -179,7 +181,7 @@ async def categories(caller: Caller = Depends(_CATALOG_READ)) -> dict[str, Any]:
     await _record(caller, "/categories")
     if _warehouse is None:
         return {"loaded": False, "categories": []}
-    return category_rollup(_warehouse)
+    return redact_payload(category_rollup(_warehouse), caller.kind)
 
 
 @app.get("/select")
@@ -187,7 +189,7 @@ async def select(category: str = Query(...), caller: Caller = Depends(_CATALOG_R
     await _record(caller, "/select")
     if _warehouse is None:
         return {"loaded": False, "category": category, "can_select": False, "certified_tools": []}
-    return select_certified(_warehouse, category)
+    return redact_payload(select_certified(_warehouse, category), caller.kind)
 
 
 @app.get("/integrations/health")
@@ -212,7 +214,7 @@ async def recommend_tools(body: RecommendRequest, caller: Caller = Depends(_CATA
     await _record(caller, "/recommend")
     if _warehouse is None:
         return {"goal": body.goal, "advisor": "none", "considered": 0, "recommendations": [], "message": "catalog not loaded"}
-    return await advisor.recommend(_warehouse, body.goal, limit=body.limit)
+    return redact_payload(await advisor.recommend(_warehouse, body.goal, limit=body.limit), caller.kind)
 
 
 # --------------------------- admin: status + tenants + keys (operator only) ---------------------------

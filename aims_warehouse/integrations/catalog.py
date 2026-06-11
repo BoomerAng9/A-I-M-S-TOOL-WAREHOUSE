@@ -57,6 +57,9 @@ def card_to_dict(card: "ToolCard", health: "IntegrationHealth | None" = None) ->
         "layer": card.layer,
         "note": card.note,
     }
+    vis = (card.raw or {}).get("visibility")
+    if vis:
+        out["visibility"] = vis
     if health is not None:
         out["live"] = {
             "status": health.status,               # healthy | unhealthy | not_configured
