@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Check your email · A.I.M.S. Tool Warehouse{% endblock %}
+{% block content %}
+<section class="auth-wrap">
+  <div class="auth-card">
+    <div class="auth-prompt">&gt;_ link sent</div>
+    <h1 class="auth-title">Check your email</h1>
+    {% if sent %}
+    <p class="auth-sub">A single-use sign-in link is on its way to <strong class="accent">{{ email }}</strong>. It expires in 15 minutes.</p>
+    {% else %}
+    <p class="auth-sub">Email isn't deliverable here right now — use this single-use link to sign in (expires in 15 min):</p>
+    <a href="{{ link }}" class="auth-btn" style="display:block;word-break:break-all;text-align:left">{{ link }}</a>
+    {% endif %}
+    <p class="auth-foot"><a href="/app/signin">← use a different email</a></p>
+  </div>
+</section>
+{% endblock %}

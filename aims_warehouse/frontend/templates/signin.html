@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Sign in · A.I.M.S. Tool Warehouse{% endblock %}
+{% block content %}
+<section class="auth-wrap">
+  <div class="auth-card">
+    <div class="auth-prompt">&gt;_ authenticate</div>
+    <h1 class="auth-title">Sign in to the Warehouse</h1>
+    <p class="auth-sub">Enter your email — we send a single-use sign-in link. New here? An account is created automatically on the free tier.</p>
+    {% if error %}<div class="auth-error">{{ error }}</div>{% endif %}
+    <form method="post" action="/app/signin" class="auth-form">
+      <input type="email" name="email" required placeholder="you@company.com" autocomplete="email" class="auth-input" autofocus>
+      <button type="submit" class="auth-btn">Send sign-in link</button>
+    </form>
+    <p class="auth-foot">Programmatic access uses an API key (<code>Authorization: Bearer aimswh_…</code>) — create one in your account after signing in.</p>
+  </div>
+</section>
+{% endblock %}

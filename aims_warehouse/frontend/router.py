@@ -6,16 +6,20 @@ No auth dependency; no scope gate; no operator/admin exposure.
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Form, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 # Catalog functions (same path both Charlotte and standalone use — never drift)
 from ..integrations.catalog import category_rollup, query_tools, select_certified
 from ..redaction import redact_payload
+from . import sessions
+from ..tenancy import store
+from ..billing import email as bemail
 
 # These are module-level singletons injected by warehouse_service at startup.
 # The router cannot import _warehouse/_registry directly (circular import),
@@ -218,7 +222,124 @@ async def search_partial(
     )
 
 
+# ──────────────────────────── auth + account ──────────────────────────────────
+
+def _public_base() -> str:
+    return (os.environ.get("WAREHOUSE_PUBLIC_URL") or "https://warehouse.aimanagedsolutions.cloud").rstrip("/")
+
+
+def _session(request: Request) -> dict | None:
+    return sessions.read_session(request.cookies.get(sessions.SESSION_COOKIE, ""))
+
+
+def _set_session_cookie(resp: Response, tenant_id: str, email: str) -> None:
+    resp.set_cookie(
+        sessions.SESSION_COOKIE,
+        sessions.sign_session(tenant_id, email),
+        max_age=sessions._SESSION_TTL,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
+
+
 @frontend_router.get("/signin", response_class=HTMLResponse)
-async def signin_stub(request: Request):
-    """Auth stub — coming soon (later increment)."""
-    return templates.TemplateResponse(request, "partials/signin_stub.html", {})
+async def signin_page(request: Request):
+    """Email sign-in form. If already signed in, go to the account locker."""
+    if _session(request):
+        return RedirectResponse("/app/account", status_code=302)
+    return templates.TemplateResponse(request, "signin.html", {})
+
+
+@frontend_router.post("/signin", response_class=HTMLResponse)
+async def signin_submit(request: Request, email: str = Form(...)):
+    """Find-or-provision a tenant for this email, mail a single-use magic link."""
+    email = (email or "").strip().lower()
+    if "@" not in email or len(email) < 5:
+        return templates.TemplateResponse(request, "signin.html", {"error": "Enter a valid email."})
+    link = f"{_public_base()}/app/auth/{sessions.sign_magic(email)}"
+    sent = False
+    try:
+        await store.find_or_provision_tenant(email)  # ensure an account exists
+        sent = bemail.send_magic_link(email, link)
+    except Exception:  # noqa: BLE001 — never leak DB/email errors to the visitor
+        pass
+    # If email isn't deliverable (Resend unconfigured / failed), surface the link
+    # inline so sign-in still works (preview/dev). Never block on email.
+    return templates.TemplateResponse(
+        request, "signin_sent.html",
+        {"email": email, "sent": sent, "link": None if sent else link},
+    )
+
+
+@frontend_router.get("/auth/{token}")
+async def auth_consume(request: Request, token: str):
+    """Consume a magic link → set the session cookie → account locker."""
+    email = sessions.read_magic(token)
+    if not email:
+        return templates.TemplateResponse(
+            request, "signin.html", {"error": "That sign-in link is invalid or expired."}
+        )
+    tenant = await store.find_or_provision_tenant(email)
+    resp = RedirectResponse("/app/account", status_code=302)
+    _set_session_cookie(resp, tenant["id"], email)
+    return resp
+
+
+@frontend_router.get("/signout")
+async def signout():
+    resp = RedirectResponse("/app/", status_code=302)
+    resp.delete_cookie(sessions.SESSION_COOKIE, path="/")
+    return resp
+
+
+async def _account_context(tenant_id: str) -> dict[str, Any]:
+    tenant = await store.get_tenant(tenant_id)
+    keys = await store.list_keys(tenant_id)
+    usage = await store.usage_summary(tenant_id, days=30)
+    peak = max((d["calls"] for d in usage["series"]), default=0) or 1
+    for d in usage["series"]:
+        d["pct"] = round((d["calls"] / peak) * 100)
+    return {"tenant": tenant, "keys": keys, "usage": usage}
+
+
+@frontend_router.get("/account", response_class=HTMLResponse)
+async def account(request: Request):
+    sess = _session(request)
+    if not sess:
+        return RedirectResponse("/app/signin", status_code=302)
+    ctx = await _account_context(sess["tenant_id"])
+    if ctx["tenant"] is None:  # tenant deleted under a live session
+        resp = RedirectResponse("/app/signin", status_code=302)
+        resp.delete_cookie(sessions.SESSION_COOKIE, path="/")
+        return resp
+    return templates.TemplateResponse(request, "account.html", {**ctx, "email": sess["email"]})
+
+
+@frontend_router.post("/keys", response_class=HTMLResponse)
+async def create_key(request: Request, name: str = Form(default="")):
+    """Mint a key for the signed-in tenant (revealed once)."""
+    sess = _session(request)
+    if not sess:
+        return HTMLResponse('<div class="auth-gone">Session expired — <a href="/app/signin">sign in</a>.</div>', status_code=401)
+    minted = await store.mint_key(sess["tenant_id"], (name or "").strip()[:60] or None, ["catalog:read"], None)
+    keys = await store.list_keys(sess["tenant_id"])
+    return templates.TemplateResponse(
+        request, "partials/keys_table.html", {"keys": keys, "revealed": minted}
+    )
+
+
+@frontend_router.post("/keys/{key_id}/revoke", response_class=HTMLResponse)
+async def revoke_key(request: Request, key_id: str):
+    """Revoke a key — only if it belongs to the signed-in tenant (ownership gate)."""
+    sess = _session(request)
+    if not sess:
+        return HTMLResponse('<div class="auth-gone">Session expired — <a href="/app/signin">sign in</a>.</div>', status_code=401)
+    owner = await store.key_tenant(key_id)
+    if owner == sess["tenant_id"]:
+        await store.revoke_key(key_id)
+    keys = await store.list_keys(sess["tenant_id"])
+    return templates.TemplateResponse(
+        request, "partials/keys_table.html", {"keys": keys, "revealed": None}
+    )

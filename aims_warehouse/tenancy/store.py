@@ -6,6 +6,8 @@ expired keys in SQL, then constant-time compares the hash in Python.
 """
 from __future__ import annotations
 
+import re as _re
+import secrets as _secrets
 import uuid as _uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -153,3 +155,82 @@ async def record_usage(key_id: Optional[str], tenant_id: Optional[str], endpoint
             "INSERT INTO usage_events (key_id, tenant_id, endpoint, status) VALUES (%s, %s, %s, %s)",
             (_as_uuid(key_id) if key_id else None, _as_uuid(tenant_id) if tenant_id else None, endpoint, status),
         )
+
+
+# ─────────────────────── frontend account (email-scoped) ──────────────────────
+
+def _full_tenant_row(r) -> dict[str, Any]:
+    return {
+        "id": str(r[0]), "name": r[1], "slug": r[2], "plan": r[3], "status": r[4],
+        "created_at": _iso(r[5]), "billing_email": r[6], "usage_credits": r[7],
+    }
+
+
+_FULL_COLS = "id, name, slug, plan, status, created_at, billing_email, usage_credits"
+
+
+async def get_tenant(tenant_id: str) -> Optional[dict[str, Any]]:
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            f"SELECT {_FULL_COLS} FROM tenants WHERE id = %s", (_as_uuid(tenant_id),)
+        )
+        r = await cur.fetchone()
+    return _full_tenant_row(r) if r else None
+
+
+async def get_tenant_by_email(email: str) -> Optional[dict[str, Any]]:
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            f"SELECT {_FULL_COLS} FROM tenants WHERE lower(billing_email) = lower(%s) "
+            "ORDER BY created_at ASC LIMIT 1",
+            (email.strip(),),
+        )
+        r = await cur.fetchone()
+    return _full_tenant_row(r) if r else None
+
+
+async def provision_tenant_for_email(email: str) -> dict[str, Any]:
+    """First sign-in for an unknown email → a free-tier tenant keyed to that email."""
+    email = email.strip().lower()
+    local = _re.sub(r"[^a-z0-9]+", "-", email.split("@")[0].lower()).strip("-")[:24] or "tenant"
+    slug = f"{local}-{_secrets.token_hex(3)}"
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            f"INSERT INTO tenants (name, slug, plan, billing_email) VALUES (%s, %s, 'free', %s) "
+            f"RETURNING {_FULL_COLS}",
+            (email, slug, email),
+        )
+        return _full_tenant_row(await cur.fetchone())
+
+
+async def find_or_provision_tenant(email: str) -> dict[str, Any]:
+    existing = await get_tenant_by_email(email)
+    return existing if existing else await provision_tenant_for_email(email)
+
+
+async def key_tenant(key_id: str) -> Optional[str]:
+    """The tenant that owns a key — used to enforce ownership before revoke."""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute("SELECT tenant_id FROM api_keys WHERE id = %s", (_as_uuid(key_id),))
+        r = await cur.fetchone()
+    return str(r[0]) if r else None
+
+
+async def usage_summary(tenant_id: str, days: int = 30) -> dict[str, Any]:
+    """Total calls in the window + a per-day series (oldest→newest) for the meter."""
+    tid = _as_uuid(tenant_id)
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT count(*) FROM usage_events WHERE tenant_id = %s "
+            "AND created_at >= now() - make_interval(days => %s)",
+            (tid, days),
+        )
+        total = (await cur.fetchone())[0]
+        cur = await conn.execute(
+            "SELECT date_trunc('day', created_at) AS d, count(*) FROM usage_events "
+            "WHERE tenant_id = %s AND created_at >= now() - make_interval(days => %s) "
+            "GROUP BY d ORDER BY d ASC",
+            (tid, days),
+        )
+        series = [{"day": _iso(r[0]), "calls": r[1]} for r in await cur.fetchall()]
+    return {"days": days, "total": int(total), "series": series}

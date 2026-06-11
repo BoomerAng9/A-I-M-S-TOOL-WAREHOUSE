@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Account · A.I.M.S. Tool Warehouse{% endblock %}
+{% block content %}
+<section class="locker">
+  <div class="locker-head">
+    <div>
+      <div class="auth-prompt">&gt;_ whoami</div>
+      <h1 class="locker-title">{{ tenant.billing_email or email }}</h1>
+      <div class="locker-meta">
+        <span class="plan-badge plan-{{ tenant.plan }}">{{ tenant.plan|upper }}</span>
+        <span class="locker-tid">tenant {{ tenant.id[:8] }}</span>
+        <span class="locker-status">{{ tenant.status }}</span>
+      </div>
+    </div>
+    <a href="/app/signout" class="signin-link">[ sign out ]</a>
+  </div>
+
+  <div class="locker-grid">
+    <div class="locker-panel locker-keys">
+      <div class="panel-head">
+        <h2>API keys</h2>
+        <form hx-post="/app/keys" hx-target="#keys-table" hx-swap="innerHTML" class="key-create">
+          <input name="name" placeholder="label (optional)" class="key-name-input" maxlength="60" autocomplete="off">
+          <button type="submit" class="auth-btn small">+ generate</button>
+        </form>
+      </div>
+      <div id="keys-table">
+        {% include "partials/keys_table.html" %}
+      </div>
+    </div>
+
+    <div class="locker-panel">
+      <div class="panel-head"><h2>Usage · {{ usage.days }}d</h2><span class="usage-total">{{ usage.total }} calls</span></div>
+      <div class="usage-meter">
+        {% for d in usage.series %}
+        <div class="usage-bar" style="height:{{ d.pct }}%" title="{{ d.calls }} calls on {{ (d.day or '')[:10] }}"></div>
+        {% else %}
+        <div class="usage-empty">No calls yet — make your first request with an API key.</div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="locker-panel">
+      <div class="panel-head"><h2>Plan &amp; billing</h2></div>
+      <p class="billing-line">Current plan: <strong class="accent">{{ tenant.plan|upper }}</strong></p>
+      <p class="billing-line">Token credits: <strong>{{ tenant.usage_credits }}</strong></p>
+      <div class="billing-actions">
+        <a href="/billing/pricing" class="auth-btn small">Upgrade plan</a>
+      </div>
+      <p class="auth-foot">Checkout runs in test mode; webhook-verified provisioning is live.</p>
+    </div>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,25 @@
+{% if revealed %}
+<div class="key-reveal">
+  <div class="key-reveal-label">&gt;_ new key — copy now, it is shown only once:</div>
+  <code class="key-reveal-value">{{ revealed.api_key }}</code>
+</div>
+{% endif %}
+{% if keys %}
+<table class="keys-table">
+  <thead><tr><th>prefix</th><th>label</th><th>created</th><th>last used</th><th>status</th><th></th></tr></thead>
+  <tbody>
+  {% for k in keys %}
+  <tr class="{{ 'key-revoked' if not k.active else '' }}">
+    <td><code>{{ k.key_prefix }}…</code></td>
+    <td>{{ k.name or '—' }}</td>
+    <td>{{ (k.created_at or '')[:10] }}</td>
+    <td>{{ (k.last_used_at or '—')[:10] if k.last_used_at else '—' }}</td>
+    <td>{% if k.active %}<span class="verdict-pass">active</span>{% else %}<span class="verdict-block">revoked</span>{% endif %}</td>
+    <td>{% if k.active %}<button class="key-revoke" hx-post="/app/keys/{{ k.id }}/revoke" hx-target="#keys-table" hx-swap="innerHTML" hx-confirm="Revoke this key? Calls using it stop immediately.">revoke</button>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="keys-empty">No API keys yet. Generate one to start calling the warehouse.</div>
+{% endif %}

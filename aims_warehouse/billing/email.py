@@ -66,3 +66,38 @@ def send_api_key(to_email: str, api_key: str, plan_label: str, base_url: str = "
     except Exception:
         _log.exception("resend send to %s failed", to_email)
         return False
+
+
+def _magic_html(link: str) -> str:
+    return f"""<!doctype html><html><body style="margin:0;background:#070707;color:#e8ffe8;font-family:ui-monospace,Menlo,monospace;padding:2rem">
+<h2 style="color:#39ff14;font-weight:600">A.I.M.S. Tool Warehouse</h2>
+<p>Click to sign in to your account. This link is single-use and expires in 15 minutes.</p>
+<p style="margin:1.4rem 0"><a href="{link}" style="display:inline-block;padding:.8rem 1.2rem;background:#0f1a0f;border:1px solid #39ff14;border-radius:8px;color:#9dff9d;text-decoration:none">&gt;_ sign in</a></p>
+<p style="opacity:.6;font-size:.8rem;word-break:break-all">{link}</p>
+<p style="opacity:.5;font-size:.75rem">If you didn't request this, ignore it — no account changes were made.</p>
+</body></html>"""
+
+
+def send_magic_link(to_email: str, link: str) -> bool:
+    """Send a sign-in magic link. Returns True on success; never raises."""
+    if not configured() or not to_email or not link:
+        return False
+    try:
+        r = httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {os.environ['RESEND_API_KEY']}"},
+            json={
+                "from": _from(),
+                "to": [to_email],
+                "subject": "Sign in to A.I.M.S. Tool Warehouse",
+                "html": _magic_html(link),
+            },
+            timeout=15,
+        )
+        if r.status_code in (200, 201):
+            return True
+        _log.warning("resend magic-link to %s returned %s", to_email, r.status_code)
+        return False
+    except Exception:
+        _log.exception("resend magic-link to %s failed", to_email)
+        return False
